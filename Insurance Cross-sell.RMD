@@ -1,0 +1,476 @@
+---
+title: "Insurance Cross-sell Project"
+author: "Pragya Bansal"
+date: "`r Sys.Date()`"
+output: 
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+      
+---
+# 1 Introduction
+This report is part of the capstone project of HarvardX’s Data Science Professional Certificate program. As we had to choose our own dataset, I picked up the dataset from Kaggle which requires a prediction of customers’ response for cross selling a different financial product. 
+
+The project aims at building a model to predict whether the customers who bought health insurance during the year will also be interested in vehicle Insurance provided by the company. Such a model can help the company plan its communication strategy to reach out to those existing customers and thus reduce marketing costs by tapping captive customer base.
+
+This report is organized in four sections wherein Section 1 describes the dataset and summarizes the goal of the project, Section 2 explains the process and techniques used such as data cleaning, data exploration and visualization and applying those to the modelling approach, Section 3 presents the modeling results and the model performance and Section 4 concludes with a brief summary of the report, its limitations and future work.
+
+## 1.1 Relevant Dataset
+This project paper is based on Health Insurance Cross Sell dataset available at: https://www.kaggle.com/anmolkumar/health-insurance-cross-sell-prediction. 
+
+The file named train.csv contains 381,109 observations across 12 variables. It contains customer information about demographics (gender, age, region code type, previously insured), Vehicles (Vehicle Age, Damage), Policy ( Premium, sourcing channel).
+
+## 1.2 Evaluation Metrics
+The evaluation of machine learning algorithms is comprised of comparing the predicted outcome with the actual outcome. Since this is a classification problem, wherein outcome is a two factor variable whether the customer is interested or not, we need to measure the accuracy of the prediction as measured by overall accuracy. 
+
+However, classification algorithms are typically impacted by the problems of false positive (ie Predict an event when there was no event) and false negative (Predict no event when in fact there was an event). Thus, besides accuracy, we need to balance the trade-off between the true positive rate and false positive rate for our predictive model. In this case, we don’t wish to miss out on any potential customer thus need to identify all customers which say yes and will do ok with targeting some customers who are not interested but model classifies them as interested.  
+
+Therefore, we shall also look at area under ROC curve or AUC. It is a plot of the false positive rate ie Specificity (x-axis) versus the true positive rate  ie Sensitivity (y-axis) for a number of different candidate threshold values between 0.0 and 1.0. This can be obtained from ROCR package available in CRAN library.
+
+## 1.3 Methodology and Workflow
+We followed below key steps:
+
+• Data preparation: We download train.csv dataset from Kaggle website and split into subsets for training and testing set. There is no specific requirement for cross validation, thus we split it into two subsets. The already given test set does not have response column and thus cannot be used for validation.  
+
+• Data exploration: We run some data exploration to see  how the features impact the outcome. The information and insights obtained during exploration will help to build the machine learning model.
+
+• Data cleaning: We remove unnecessary information which can slow the processing and convert the features into numeric variables.
+
+• Data modeling:  This step involves identification of the most important features that help to predict the outcome and measuring the efficacy of such prediction against identified project goal.  We started with very simple models of random prediction and then moved to more complex models of logistic regression and XGBoost. While some of the models gave high accuracy, they did not balance the specificity and sensitivity issues. Thus, our final choice of model is based on the one which helps achieve higher ROC score without compromising the accuracy much. 
+
+# 2 Process and Technique
+## 2.1 Data Preparation
+We split dataset in two parts, the training set and the testing  set with 80% and 20% of the original dataset respectively. We download the requisite R packages from CRAN library. The models shall be run on train set and tested on test set to identify the most apt model.
+
+```{r echo=FALSE}
+
+# Attaching required packages
+
+if(!require(tidyverse))
+  install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(data.table))
+  install.packages("data.table", repos = "http://cran.us.r-project.org")
+if(!require(rpart))
+  install.packages("rpart", repos = "http://cran.us.r-project.org")
+if(!require(caret)) 
+  install.packages("caret", repos = "http://cran.us.r-project.org")
+if(!require(PRROC)) 
+  install.packages("PRROC",  repos = "http://cran.us.r-project.org")
+if(!require(ROCR)) 
+  install.packages("ROCR", repos = "http://cran.us.r-project.org")
+if(!require(xgboost)) 
+  install.packages("xgboost", repos = "http://cran.us.r-project.org")
+if(!require(corrr)) 
+  install.packages("corrr", repos = "http://cran.us.r-project.org")
+
+library(corrr)
+
+# Downloading database
+# https://www.kaggle.com/anmolkumar/health-insurance-cross-sell-prediction
+
+train <- read_csv("./train.csv")
+str(train)
+
+# Converting character variables to numeric
+
+train$gender[train$Gender == "Male"] <- 1
+train$gender[train$Gender != "Male"] <- 0
+train$damage[train$Vehicle_Damage == "Yes"] <- 1
+train$damage[train$Vehicle_Damage != "Yes"] <- 0
+train$veh_age[train$Vehicle_Age == "> 2 Years"] <- 2
+train$veh_age[train$Vehicle_Age == "< 1 Year"] <- 0
+train$veh_age[train$Vehicle_Age == "1-2 Year"] <- 1
+
+train <- train %>% select(gender, Age, Previously_Insured, veh_age, damage, Annual_Premium, Policy_Sales_Channel, Response)
+
+str(train)
+
+# Splitting the data into 80:20 between train and test set
+set.seed(1234, sample.kind = "Rounding") 
+test_index <- createDataPartition(train$Response, times = 1, p = 0.2, list = FALSE)
+test_set <- train[test_index,]
+train_set <- train[-test_index,]
+
+```
+## 2.2 Data Exploration
+We first need to understand the structure of the data, the distribution of responses and the relationship of the predictors to help build a better model. The data has 381,109 observations with 8 variables which have been converted to numeric. 
+
+We are aiming to predict the Response based on other variables. The response is a two factor numeric variable with a fair degree of imbalance as the proportion of affirmative responses are about 12%.
+
+We thus try to find some variables which can have higher impact on the response being Yes. While there is not much variation in responses of males or females, the absence of insurance previously or having incurred a damage previously results in higher response as Yes.
+
+```{r echo=FALSE}
+# Use the data to determine correlation of Response with other variables.
+
+Cor_response <- train %>% correlate() %>% focus(Response)
+
+Cor_response
+
+# Proportion of Yes response in training set and test set suggests that No (or 0 ) has higher occurence
+mean(train_set$Response == 1)
+mean(test_set$Response == 1)
+
+# Use the training set to determine whether a given Gender were more likely to respond yes. Apply this insight to generate predictions on the test set.
+
+Gender_response <- train_set %>% group_by(gender) %>% summarize(Response_prop = mean(Response == 1))
+Gender_response
+
+# Use the training set to determine in previously insured people were more likely to respond yes. we will Apply this insight to generate predictions on the test set.
+
+Prev_Ins_response <- train_set %>% group_by(Previously_Insured) %>% summarize(Response_prop = mean(Response == 1))
+
+Prev_Ins_response
+
+
+# Use the training set to determine if vehicle damage leads to more response of yes. we will Apply this insight to generate predictions on the test set.
+
+Damage_response <- train_set %>% group_by(damage) %>% summarize(Response_prop = mean(Response == 1))
+
+Damage_response
+
+
+```
+
+## 2.3 Data Cleaning
+Having more features increases the complexity and computing requirement, thus we could eliminate data features not needed. 
+
+```{r, echo=TRUE}
+train_set <- train_set %>% select(Age, Previously_Insured, veh_age, damage, Policy_Sales_Channel, Response)
+
+test_set  <- test_set  %>% select(Age, Previously_Insured, veh_age, damage, Policy_Sales_Channel, Response)
+
+```
+
+## 2.4 Data Modelling
+### 2.4.1 Random Prediction
+This is essentially based on assigning responses randomly through sampling. As we shall see in the next section that it will give a poor accuracy and AUC.
+
+### 2.4.2 Factor based Linear Models
+The next improvisation over random prediction is linear models - the simplest one assigns the responses based on the correlation between the features. As we know there are two critical features - Previously Insured which has a relatively decent negative correlation to response and Damage Suffered which has a decent positive correlation. We start by assigning response based on these features separately and then aim to improve the accuracy and AUC by combining both these together.
+
+These models provide poor accuracy as we shall see thus we first need to improve the accuracy followed by AUC.
+
+### 2.4.3 Logistic Regression Models
+
+Logistic regression models are used where the dependent variable is categorical which in our case is a two factor categorical outcome. We first use only two most relevant features - previous insurance and damage, and then try to predic the outcome based on all features. 
+
+As we shall see that while this gives high accuracy, it performs poorly on specificity and sensitivity with AUC being 0.5.
+
+### 2.4.4 Boosting Models
+
+Boosting models are widely used machine learning tool for improving the accuracy of classification models.  It starts by fitting an initial model (e.g. a tree or linear regression) to the data. Then a second model is built that focuses on accurately predicting the cases where the first model performs poorly. The combination of these two models is expected to be better than either model alone. Then you repeat this process of boosting many times.  Each successive model attempts to correct for the shortcomings of the combined boosted ensemble of all previous models.
+
+There are varied boosting algoithms the most common being gradient boosting - gradient boosting is called so because target outcomes for each case are set based on the gradient of the error (which can be specified by users based on evaluation metric) with respect to the prediction. Each new model takes a step in the direction that minimizes prediction error, in the space of possible predictions for each training case. 
+
+We have used XGBoost package to fit the gradient boosting model due to its ability to offer better accuracy with speed.
+
+ 
+# 3 Results
+
+The models are evaluated using the overall accuracy and  AUC. AUC ie area under ROC curve is a plot of the false positive rate ie Specificity (x-axis) versus the true positive rate ie Sensitivity (y-axis) for a number of different threshold values between 0.0 and 1.0.
+
+## 3.1 Random Prediction
+This is essentially based on assigning responses randomly. As we see that it gives a poor accuracy and AUC of about 50%.
+
+```{r, echo=FALSE}
+
+# The simplest prediction method is randomly guessing the outcome without using additional predictors. These methods will help us determine whether our machine learning algorithm performs better than chance.
+
+set.seed(3, sample.kind = "Rounding")
+
+guess_response <- sample(c(0,1), nrow(test_set), replace = TRUE)
+
+## Calculating the accuracy for the Random Prediction Model
+
+confusionMatrix(data = factor(guess_response), reference = factor(test_set$Response))
+
+## Calculating the AUC for the Random Prediction Model
+
+pred_guess <- prediction(
+   as.numeric(as.character(guess_response)),as.numeric(as.character(test_set$Response)))
+
+auc_val_guess <- performance(pred_guess, "auc")
+auc_plot_guess <- performance(pred_guess, 'sens', 'spec')
+plot(auc_plot_guess, main=paste("AUC:", auc_val_guess@y.values[[1]]))
+
+## Creating the results table with evaluation metrics
+
+result <- tibble(Method = "random_prediction", Accuracy = confusionMatrix(data = factor(guess_response), reference = factor(test_set$Response)) $overall["Accuracy"], AUC = auc_val_guess@y.values[[1]])
+
+result
+
+```
+
+## 3.2 Factor Based Linear Predictive Models
+We tried predicting the outcome based on two critical features - previously insured which has negative correlation to response and damage suffered which has positive correlation. This will help us examine the accuracy of the prediction along with AUC (that captures specificity and sensitivity as well).
+
+We improve the accuracy and AUC by combining both these together - this leads to a further improvement in accuracy and AUC to 64% and 78% respectively which is better than standalone accuracy of both the models. However, these are simplistic approaches and lets try regression techniques to evaluate the impact. 
+
+```{r, echo=FALSE}
+
+# Since not having insurance previously is likely to have higher affirmative response rate, lets create a model for this and check its parameters.
+
+Prev_Ins_model <- ifelse(test_set$Previously_Insured == 0, 1, 0)
+
+## Calculating the accuracy for the Previous Insurance Model
+
+confusionMatrix(data = factor(Prev_Ins_model), reference = factor(test_set$Response))
+
+## Calculating the AUC for the Previous Insurance Model
+
+pred_Prev_Ins <- prediction(
+   as.numeric(as.character(Prev_Ins_model)),as.numeric(as.character(test_set$Response)))
+
+auc_val_Prev_Ins <- performance(pred_Prev_Ins, "auc")
+auc_plot_Prev_Ins <- performance(pred_Prev_Ins, 'sens', 'spec')
+plot(auc_plot_Prev_Ins, main=paste("AUC:", auc_val_Prev_Ins@y.values[[1]]))
+
+## Creating the results table with evaluation metrics
+
+result <- bind_rows(result, tibble(Method = " Prev_Ins_model ",
+                    Accuracy = confusionMatrix(data = factor(Prev_Ins_model), reference = factor(test_set$Response)) $overall["Accuracy"], AUC = auc_val_Prev_Ins@y.values[[1]]))
+
+result
+
+
+# Since having suffered a damage previously is likely to have higher affirmative response rate, lets create a model for this and check its parameters.
+
+Damage_model <- ifelse(test_set$damage == 1, 1, 0)
+
+## Calculating the accuracy for the Damage Model
+
+confusionMatrix(data = factor(Damage_model), reference = factor(test_set$Response))
+
+
+## Calculating the AUC for the Damage Model
+
+pred_Damage <- prediction(
+   as.numeric(as.character(Damage_model)),as.numeric(as.character(test_set$Response)))
+
+auc_val_Damage <- performance(pred_Damage, "auc")
+auc_plot_Damage <- performance(pred_Damage, 'sens', 'spec')
+plot(auc_plot_Damage, main=paste("AUC:", auc_val_Damage@y.values[[1]]))
+
+## Creating the results table with evaluation metrics
+
+result <- bind_rows(result, tibble(Method = " Damage_model ",
+                    Accuracy = confusionMatrix(data = factor(Damage_model), reference = factor(test_set$Response)) $overall["Accuracy"], AUC = auc_val_Damage@y.values[[1]]))
+
+result
+
+# Let us combine these two factors together to see their impact on affirmative response rate, lets create a model for this and check its parameters.
+
+Damage_Insurance_combine <- ifelse(test_set$damage == 1 & test_set$Previously_Insured == 0, 1, 0)
+
+## Calculating the accuracy for the combined Damage and Insurance Model
+
+confusionMatrix(data = factor(Damage_Insurance_combine), reference = factor(test_set$Response))
+
+
+## Calculating the AUC for the Damage Model
+
+pred_Damage_Insurance_combine <- prediction(
+   as.numeric(as.character(Damage_Insurance_combine)),as.numeric(as.character(test_set$Response)))
+
+auc_val_Damage_Insurance_combine <- performance(pred_Damage_Insurance_combine, "auc")
+auc_plot_Damage_Insurance_combine <- performance(pred_Damage_Insurance_combine, 'sens', 'spec')
+plot(auc_plot_Damage_Insurance_combine, main=paste("AUC:", auc_val_Damage_Insurance_combine@y.values[[1]]))
+
+## Creating the results table with evaluation metrics
+
+result <- bind_rows(result, tibble(Method = " Damage_Insurance_combine ",
+                    Accuracy = confusionMatrix(data = factor(Damage_Insurance_combine), reference = factor(test_set$Response)) $overall["Accuracy"], AUC = auc_val_Damage_Insurance_combine@y.values[[1]]))
+
+result
+
+```
+
+## 3.3 Logistic Regression Models
+
+Logistic regression models are used where the dependent variable is categorical which in our case is a two factor categorical outcome. We first use only two most relevant features - previous insurance and damage. This while gives high accuracy, performs poorly on specificity and sensitivity with AUC being 0.5. 
+
+We then try to see if modeling the outcome on all variables improves the AUC but to no benefit. It remains 0.5 whereas we are targetting AUC of >0.80. 
+
+```{r, echo=FALSE}
+
+# We are using the logistic regression model from Caret package to predict response based on two features - previously insured and damaged.
+
+set.seed(3, sample.kind = "Rounding")
+
+train_set$Response <- as.factor(train_set$Response)
+
+train_glm <- train(Response ~ Previously_Insured + damage, method = "glm", data = train_set)
+
+glm_prediction <- predict(train_glm, test_set)
+
+## Calculating the accuracy for the Previous Insurance Model
+
+confusionMatrix(data = factor(glm_prediction), reference = factor(test_set$Response))
+
+## Calculating the AUC for the Previous Insurance Model
+
+pred_glm <- prediction(
+   as.numeric(as.character(glm_prediction)),as.numeric(as.character(test_set$Response)))
+
+auc_val_glm <- performance(pred_glm, "auc")
+auc_plot_glm <- performance(pred_glm, 'sens', 'spec')
+plot(auc_plot_glm, main=paste("AUC:", auc_val_glm@y.values[[1]]))
+
+## Creating the results table with evaluation metrics
+
+result <- bind_rows(result, tibble(Method = " prediction_glm ",
+                    Accuracy = confusionMatrix(data = factor(glm_prediction), reference = factor(test_set$Response)) $overall["Accuracy"], AUC = auc_val_glm@y.values[[1]]))
+
+result
+
+# We are using the logistic regression model from Caret package to predict response based on all factors to see if the evaluation parameters improve.
+
+set.seed(3, sample.kind = "Rounding")
+
+train_set$Response <- as.factor(train_set$Response)
+
+train_glm_all <- train(Response ~ ., method = "glm", data = train_set)
+
+glm_prediction_all <- predict(train_glm_all, test_set)
+
+## Calculating the accuracy for the Previous Insurance Model
+
+confusionMatrix(data = factor(glm_prediction_all), reference = factor(test_set$Response))
+
+## Calculating the AUC for the Previous Insurance Model
+
+pred_glm_all <- prediction(
+   as.numeric(as.character(glm_prediction_all)),as.numeric(as.character(test_set$Response)))
+
+auc_val_glm_all <- performance(pred_glm_all, "auc")
+auc_plot_glm_all <- performance(pred_glm_all, 'sens', 'spec')
+plot(auc_plot_glm_all, main=paste("AUC:", auc_val_glm_all@y.values[[1]]))
+
+## Creating the results table with evaluation metrics
+
+result <- bind_rows(result, tibble(Method = " prediction_glm_all ",
+                    Accuracy = confusionMatrix(data = factor(glm_prediction_all), reference = factor(test_set$Response)) $overall["Accuracy"], AUC = auc_val_glm_all@y.values[[1]]))
+
+result
+
+```
+## 3.4 XG Boost Model
+
+XGBoost is a high performing model which gets good results.XGBoost refers to Extreme Gradient Boosting, which is an efficient implementation of gradient boosting framework for tree learning algorithms. 
+
+I tried the decision trees (using rpart) and random forest models separately, which took very long time without any better outcome than the glm models shown above. Thus these are not included as part of the project report and instead a faster XGBoost package is counted which can do parallel computation at a 10x faster speed.
+
+As explained earlier, it does repetitive modelling building upon the error of previous model until the best outcome on evaluation metric is achieved. In this case, we specified maximising accuracy or minimising the test error as our evaluation criteria to get the best fit model. This was then used to review the AUC. 
+
+At an accuracy of about 0.87, it improved the AUC to 0.85 which we aimed to achieve (>0.80).
+
+```{r, echo=FALSE}
+
+# We are using the XGBoost Package which has already been installed from CRAN library.
+
+set.seed(1234, sample.kind = "Rounding")
+
+library(xgboost)
+
+# We convert our train and test set in XGBoost compliant dataset format.
+
+xgb_train <- xgb.DMatrix(
+ as.matrix(train_set[, colnames(train_set) != "Response"]), 
+ label = as.numeric(as.character(train_set$Response)))
+
+xgb_test <- xgb.DMatrix(
+  as.matrix(test_set[, colnames(test_set) != "Response"]), 
+  label = as.numeric(as.character(test_set$Response)))
+
+
+# We create the XGBoost model by specifying the tuning parameters. We used the error (ie Binary classification error rate which measures #wrong cases/#all cases) minimization as our evaluation metric.
+
+xgb_params <- list(
+ objective = "binary:logistic", 
+ eta = 1, 
+ max.depth = 2, 
+ nthread = 5, 
+ eval_metric = "error")
+
+xgb_model <- xgb.train(
+    data = xgb_train, 
+    params = xgb_params, 
+    watchlist = list(test = xgb_test), 
+    nrounds = 200, 
+    early_stopping_rounds = 50,
+     verbosity = 0,
+     print_every_n = 100,
+     silent = T)
+
+# XGBoost model suggests the relative importance of various features and confirms that Previous Insurance and Damage are the two most pertinent predictors.
+
+feature_imp_xgb <- xgb.importance(colnames(train_set), model = xgb_model)
+
+
+xgb.plot.importance(feature_imp_xgb, rel_to_first = TRUE, xlab = "Relative importance")
+
+predictions_xgb = predict(
+  xgb_model, 
+  newdata = as.matrix(test_set[, colnames(test_set) != "Response"]), 
+  ntreelimit = xgb_model$bestInd)
+
+
+## Calculating the AUC for the XGBoost Model
+
+pred_xgb <- prediction(
+as.numeric(as.character(predictions_xgb)),as.numeric(as.character(test_set$Response)))
+
+
+auc_val_xgb <- performance(pred_xgb, "auc")
+auc_plot_xgb <- performance(pred_xgb, 'sens', 'spec')
+plot(auc_plot_xgb, main=paste("AUC:", auc_val_xgb@y.values[[1]]))
+
+## Creating the results table with evaluation metrics. Accuracy is the 1-error for selected model which stopped at 25th iteration.
+
+result <- bind_rows(result, tibble(Method = " predictions_xgb ",
+                    Accuracy = 0.877201, AUC = auc_val_xgb@y.values[[1]]))
+
+result
+
+
+```
+ 
+ 
+# 4 Conclusion
+
+There are various pre-steps before running the models which are extremely important for the models to show correct results. These include data preparation, data exploration and data analysis.
+
+Further its important to start building simple models before getting to more complex ones as it helps understand the improvements brought about by using a stepped-up approach. We gather more insights into the data as we start with simple models. 
+
+In our case we started with a random model that predicts the response through random sampling. At this stage we started adding other relevant features to our prediction model such as previously insured, damage etc and then With logistic regression aim to predict the response. While the logistic regression model increased the overall accuracy, it lead to high degree of false negatives and false positives. Thus, we implemented the XG Boost package to help improve the performance across the parameters of specificity and sensitivity.
+
+## 4.1 Limitations
+
+One of the limitation of our classification model is that we have not used any technique to improve to balance within dataset.The outcome of model is impacted by the prevalence where we have higher proportion of negative responses and thus this problem can be addressed through oversampling by introducing higher positive values and undersampling by eliminating certain negative values.
+For over-sampling, we have to generate additional data points of smaller class in the training set after splitting. 
+
+Another aspect is that we can use ensemble technique to improve the performance of the classification model. Ensemble tries to combine various machine learning techniques to provide the best outcome. The three most popular methods for combining the predictions from different models are:
+
+Bagging - Building multiple models (typically of the same type) from different subsamples of the training dataset.
+
+Boosting - Building multiple models (typically of the same type) each of which learns to fix the prediction errors of a prior model in the chain.
+
+Stacking - Building multiple models (typically of differing types) and supervisor model that learns how to best combine the predictions of the primary models.
+
+## 4.2 Way Forward for Future
+
+Some of the limitations discussed above can get addressed by building additional algorithms using packages available in R. 
+
+The most common technique is SMOTE - Synthetic Minority Over-Sampling Technique which we have not implemented. This can be done achieved by using SMOTE package in CRAN. 
+
+While we have used the boosting technique in our last model using XGBoosting method and also the bagging technique (using decision tree though not included here), we can try to implement stacking of algorithms using caretEnsemble package. When we combine the predictions of different models using stacking, it is desirable that the predictions made by the sub-models have low correlation. This would suggest that the models are skillful but in different ways, allowing a new classifier to figure out how to get the best from each model for an improved score.
+
+
+# Resource References
+1. https://courses.edx.org/dashboard/programs/3c32e3e0-b6fe-4ee4-bd4f-210c6339e074/
+2. https://rafalab.github.io/dsbook/
+3. https://cran.r-project.org/web/packages/xgboost/xgboost.pdf
+4. https://statinfer.com/203-4-3-roc-and-auc/
+5. https://cran.r-project.org/web/packages/ROCR/ROCR.pdf
+
